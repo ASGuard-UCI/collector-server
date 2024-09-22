@@ -1,16 +1,22 @@
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
 import logging
 import os
-
-from datetime import datetime, timedelta
+import threading
 
 import mysql.connector
 import requests_cache
 
 from scapy.all import sniff
 from scapy.contrib.rtps import RTPS
-from scapy.contrib.rtps.rtps import RTPSMessage, RTPSSubMessage_ACKNACK, RTPSSubMessage_HEARTBEAT
+from scapy.contrib.rtps.rtps import (
+    RTPSMessage,
+    RTPSSubMessage_ACKNACK,
+    RTPSSubMessage_HEARTBEAT,
+)
 from scapy.layers.all import IP, UDP
 from scapy.utils import PcapWriter
+
 
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
@@ -21,16 +27,31 @@ if not (MYSQL_USERNAME and MYSQL_PASSWORD and MYSQL_HOST and MYSQL_DATABASE):
     raise Exception("MySQL credentials missing")
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(filename="collector.log", level=logging.INFO, filemode='w')
+logging.basicConfig(filename="collector.log", level=logging.INFO, filemode="w")
 
 session = requests_cache.CachedSession("ip_cache", expire_after=timedelta(days=5))
 
-SENT_ENCLAVE = False
+# Store queues of packets associated with a specific node's IP
+ROS2_NODE_MAP = defaultdict(deque)
+
+# Keep track of existing sessions with a set that stores the IPs of nodes
+EXISTING_SESSIONS = set()
+
+# There can be a race condition where a session ends, causing the IP to be
+# removed from the existing sessions set, but at the same time, packets for
+# the same IP come in, initiating a new session and adding it back to the
+# existing sessions set.
+EXISTING_SESSIONS_LOCK = threading.Lock()
 
 
 def sniff_packets(iface):
     logger.info("Starting sniffer on ports 7400, 7410, 7411")
-    sniff(filter="inbound and port 7400 or port 7410 or port 7411", prn=_process_packet, iface=iface, store=0)
+    sniff(
+        filter="inbound and port 7400 or port 7410 or port 7411",
+        prn=_process_packet,
+        iface=iface,
+        store=0,
+    )
     logger.info("Stopped sniffer")
 
 
@@ -40,24 +61,23 @@ def _process_packet(packet):
         ros2_node_ip = packet[IP].src
         pktdump = PcapWriter(f"data/{ros2_node_ip}.pcap", append=True, sync=True)
 
-        # TODO: Check for unique GUID
-        # TODO: If the RTPS layer contains no mention of the collector server IP, then this is an invalid packet
-        # TODO: Pipe ZMap IP addresses into the crafted packet (through cmd-line arguments?)
-
-        # zmap -p 7400,7410,7411,7412 0.0.0.0/0 -q | python3 amplification_vulnerability.py
         raw_layer = bytes(packet[UDP].payload)
         rtps_packet = RTPS(raw_layer)
+
+        insert_packet(ros2_node_ip, raw_layer, now)
+        pktdump.write(packet)
+
         rtps_message_packet = rtps_packet[RTPSMessage]
-        if rtps_message_packet.haslayer(RTPSSubMessage_HEARTBEAT):
-            heartbeat = rtps_message_packet[RTPSSubMessage_HEARTBEAT]
-            print(heartbeat.fields)
-            pktdump.write(packet)
-            insert_packet(ros2_node_ip, raw_layer, now)
-        if rtps_message_packet.haslayer(RTPSSubMessage_ACKNACK):
-            acknack = rtps_message_packet[RTPSSubMessage_ACKNACK]
-            print(acknack.fields)
-            pktdump.write(packet)
-            insert_packet(ros2_node_ip, raw_layer, now)
+
+        ROS2_NODE_MAP[ros2_node_ip].append(rtps_message_packet)
+
+        if ros2_node_ip not in EXISTING_SESSIONS:
+            with EXISTING_SESSIONS_LOCK:
+                EXISTING_SESSIONS.add(ros2_node_ip)
+
+            thread = threading.Thread(target=_handle_session, args=[ros2_node_ip])
+            thread.start()
+
         logger.info(f"Received RTPS packet at {now} from {ros2_node_ip}")
     except Exception as e:
         logger.error(f"Failed to dissect packet from {ros2_node_ip}", exc_info=True)
@@ -66,32 +86,61 @@ def _process_packet(packet):
 
 def _initiate_connection():
     return mysql.connector.connect(
-            user=MYSQL_USERNAME,
-            password=MYSQL_PASSWORD,
-            host=MYSQL_HOST,
-            database=MYSQL_DATABASE
-        )
+        user=MYSQL_USERNAME,
+        password=MYSQL_PASSWORD,
+        host=MYSQL_HOST,
+        database=MYSQL_DATABASE,
+    )
 
 
 def _geolocate(ip):
     response = session.get(f"https://ipwho.is/{ip}")
     status = response.status_code
     if status != 200:
-        logger.error(f"Failed to get geolocation data from {ip} with status code {status}")
+        logger.error(
+            f"Failed to get geolocation data from {ip} with status code {status}"
+        )
         return {"region": None, "country": None}
     response = response.json()
-    return {"region": response["region"], "country": response["country_code"]} 
+    return {"region": response["region"], "country": response["country_code"]}
+
+
+def _handle_session(ros2_node_ip):
+    """
+    Initiate a session (thread) that pops packets from its corresponding queue while the queue is not empty
+    If the queue is empty for more than 10 seconds? stop the session
+    """
+    print("Initiating thread")
+
+    now = datetime.now()
+
+    while datetime.now() - now <= timedelta(seconds=10):
+        if len(ROS2_NODE_MAP[ros2_node_ip]) > 0:
+            message_packet = ROS2_NODE_MAP[ros2_node_ip].popleft()
+            if message_packet.haslayer(RTPSSubMessage_HEARTBEAT):
+                heartbeat = message_packet[RTPSSubMessage_HEARTBEAT]
+                print(heartbeat.fields)
+            if message_packet.haslayer(RTPSSubMessage_ACKNACK):
+                acknack = message_packet[RTPSSubMessage_ACKNACK]
+                print(acknack.fields)
+
+            now = datetime.now()
+
+    with EXISTING_SESSIONS_LOCK:
+        EXISTING_SESSIONS.remove(ros2_node_ip)
+
+    print("Stopping thread")
 
 
 def insert_packet(ros2_node_ip, raw_layer, timestamp):
     cnx = _initiate_connection()
     cursor = cnx.cursor()
     insert_packet = "INSERT INTO packets (received_time, ip, location, payload) VALUES (%s, %s, %s, %s)"
-    
+
     geo_data = _geolocate(ros2_node_ip)
     region = geo_data["region"]
     country = geo_data["country"]
-    
+
     insert_data = (timestamp, ros2_node_ip, region + ", " + country, raw_layer)
 
     cursor.execute(insert_packet, insert_data)
@@ -104,4 +153,3 @@ def insert_packet(ros2_node_ip, raw_layer, timestamp):
 
 if __name__ == "__main__":
     sniff_packets("eth0")
-
