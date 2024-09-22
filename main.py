@@ -1,8 +1,5 @@
-import json
 import logging
 import os
-import re
-import urllib.parse
 
 from datetime import datetime, timedelta
 
@@ -14,9 +11,6 @@ from scapy.contrib.rtps import RTPS
 from scapy.contrib.rtps.rtps import RTPSMessage, RTPSSubMessage_ACKNACK, RTPSSubMessage_HEARTBEAT
 from scapy.layers.all import IP, UDP
 from scapy.utils import PcapWriter
-
-from acknack import send_acknack
-from heartbeat import send_heartbeat
 
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
