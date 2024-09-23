@@ -63,13 +63,12 @@ def _process_packet(packet):
 
         raw_layer = bytes(packet[UDP].payload)
         rtps_packet = RTPS(raw_layer)
-
-        insert_packet(ros2_node_ip, raw_layer, now)
-        pktdump.write(packet)
-
         rtps_message_packet = rtps_packet[RTPSMessage]
 
         ROS2_NODE_MAP[ros2_node_ip].append(rtps_message_packet)
+
+        insert_packet(ros2_node_ip, raw_layer, now)
+        pktdump.write(packet)
 
         if ros2_node_ip not in EXISTING_SESSIONS:
             with EXISTING_SESSIONS_LOCK:
