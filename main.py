@@ -17,6 +17,9 @@ from scapy.contrib.rtps.rtps import (
 from scapy.layers.all import IP, UDP
 from scapy.utils import PcapWriter
 
+from heartbeat import send_heartbeat
+from acknack import send_acknack
+
 
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
@@ -62,6 +65,7 @@ def _process_packet(packet):
         pktdump = PcapWriter(f"data/{ros2_node_ip}.pcap", append=True, sync=True)
 
         raw_layer = bytes(packet[UDP].payload)
+        src_port = packet[UDP].sport
         rtps_packet = RTPS(raw_layer)
         rtps_message_packet = rtps_packet[RTPSMessage]
 
@@ -74,7 +78,9 @@ def _process_packet(packet):
             with EXISTING_SESSIONS_LOCK:
                 EXISTING_SESSIONS.add(ros2_node_ip)
 
-            thread = threading.Thread(target=_handle_session, args=[ros2_node_ip])
+            thread = threading.Thread(
+                target=_handle_session, args=[ros2_node_ip, src_port]
+            )
             thread.start()
 
         logger.info(f"Received RTPS packet at {now} from {ros2_node_ip}")
@@ -104,7 +110,7 @@ def _geolocate(ip):
     return {"region": response["region"], "country": response["country_code"]}
 
 
-def _handle_session(ros2_node_ip):
+def _handle_session(ros2_node_ip, port):
     """
     Initiate a session (thread) that pops packets from its corresponding queue while the queue is not empty
     If the queue is empty for more than 10 seconds? stop the session
@@ -118,10 +124,10 @@ def _handle_session(ros2_node_ip):
             message_packet = ROS2_NODE_MAP[ros2_node_ip].popleft()
             if message_packet.haslayer(RTPSSubMessage_HEARTBEAT):
                 heartbeat = message_packet[RTPSSubMessage_HEARTBEAT]
-                print(heartbeat.fields)
+                send_acknack(ros2_node_ip, port)
             if message_packet.haslayer(RTPSSubMessage_ACKNACK):
                 acknack = message_packet[RTPSSubMessage_ACKNACK]
-                print(acknack.fields)
+                # send_heartbeat(ros2_node_ip, port)
 
             now = datetime.now()
 

@@ -1,4 +1,4 @@
-from scapy.all import RawVal, send
+from scapy.all import send
 from scapy.contrib.rtps import RTPS
 from scapy.contrib.rtps.rtps import (
     GUIDPrefixPacket,
@@ -10,57 +10,37 @@ from scapy.contrib.rtps.rtps import (
 )
 from scapy.layers.inet import IP, UDP
 
-from common import APP_ID, HOST_ID, INSTANCE_ID, LISTENER_IP
 
-
-def send_acknack(ros2_node_ip):
+def send_acknack(ros2_node_ip, port):
     rtps_packet = RTPS(
-        # Using 2.3 for protocol version since ROS 2
-        protocolVersion=ProtocolVersionPacket(major=2, minor=3),
-        # Vendor is eProsima - Fast-RTPS "01.15"
-        vendorId=VendorIdPacket(vendor_id=RawVal("\x01\x0F")),
-        # Taken directly from Wireshark packet. How are these values generated?
-        guidPrefix=GUIDPrefixPacket(
-            hostId=HOST_ID,
-            appId=APP_ID,
-            instanceId=INSTANCE_ID,
-        ),
         magic=b"RTPS",
+        protocolVersion=ProtocolVersionPacket(major=2, minor=3),
+        vendorId=VendorIdPacket(vendor_id=271),
+        guidPrefix=GUIDPrefixPacket(hostId=17802292, appId=2902144048, instanceId=0),
     ) / RTPSMessage(
         submessages=[
             RTPSSubMessage_INFO_DST(
-                submessageFlags=0x01,
+                submessageId=14,
+                submessageFlags=1,
                 octetsToNextHeader=12,
                 guidPrefix=GUIDPrefixPacket(
-                    hostId=HOST_ID,
-                    appId=APP_ID,
-                    instanceId=INSTANCE_ID,
+                    hostId=17780274, appId=152422119, instanceId=0
                 ),
             ),
             RTPSSubMessage_ACKNACK(
-                # Some ACKNACK packets have the "final flag" set. What does
-                # this mean? The value of this flag affects the number in
-                # octetsToNextHeader.
-                # As with the HEARTBEAT packets, DDS seems to be testing
-                # whether the publishing/subscribing capabilities work
-                # via the reader and writer entities.
-                submessageFlags=0x01,
+                submessageId=6,
+                submessageFlags=1,
                 octetsToNextHeader=24,
                 reader_id=b"\x00\x02\x00\xc7",
                 writer_id=b"\x00\x02\x00\xc2",
                 readerSNState=b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-                count=2 << 24,
+                count=25,
             ),
         ]
     )
 
-    udp_packet = UDP(sport=33653, dport=7400)
+    udp_packet = UDP(sport=33653, dport=port)
     ip_packet = IP(dst=ros2_node_ip)
 
     packet = ip_packet / udp_packet / rtps_packet
     send(packet)
-
-
-if __name__ == "__main__":
-    send_acknack("")
-
