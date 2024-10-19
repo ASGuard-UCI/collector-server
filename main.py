@@ -1,12 +1,11 @@
-from collections import defaultdict, deque
-from datetime import datetime, timedelta
 import logging
 import os
 import threading
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
 
 import mysql.connector
 import requests_cache
-
 from scapy.all import sniff
 from scapy.contrib.rtps import RTPS
 from scapy.contrib.rtps.rtps import (
@@ -17,9 +16,8 @@ from scapy.contrib.rtps.rtps import (
 from scapy.layers.all import IP, UDP
 from scapy.utils import PcapWriter
 
-from heartbeat import send_heartbeat
 from acknack import send_acknack
-
+from heartbeat import send_heartbeat
 
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
@@ -62,6 +60,10 @@ def _process_packet(packet):
     now = datetime.now()
     try:
         ros2_node_ip = packet[IP].src
+        has_scanned = find_ip(ros2_node_ip)
+        if not has_scanned:
+            return
+
         pktdump = PcapWriter(f"data/{ros2_node_ip}.pcap", append=True, sync=True)
 
         raw_layer = bytes(packet[UDP].payload)
@@ -154,6 +156,19 @@ def insert_packet(ros2_node_ip, raw_layer, timestamp):
     cnx.commit()
     cursor.close()
     cnx.close()
+
+
+def find_ip(ros2_node_ip):
+    cnx = _initiate_connection()
+    cursor = cnx.cursor()
+
+    has_been_scanned_stmt = "SELECT ipv4 FROM scanned_ips WHERE ipv4 = %s"
+    cursor.execute(has_been_scanned_stmt, (ros2_node_ip,))
+
+    has_been_scanned = len(cursor.fetchall()) != 0
+    cursor.close()
+    cnx.close()
+    return has_been_scanned
 
 
 if __name__ == "__main__":
