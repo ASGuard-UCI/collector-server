@@ -11,7 +11,7 @@ from scapy.contrib.rtps.rtps import (
 from scapy.layers.inet import IP, UDP
 
 
-def send_acknack(ros2_node_ip, port):
+def send_acknack(ros2_node_ip, port, guid_prefix_packet):
     rtps_packet = RTPS(
         magic=b"RTPS",
         protocolVersion=ProtocolVersionPacket(major=2, minor=3),
@@ -23,9 +23,7 @@ def send_acknack(ros2_node_ip, port):
                 submessageId=14,
                 submessageFlags=1,
                 octetsToNextHeader=12,
-                guidPrefix=GUIDPrefixPacket(
-                    hostId=17780274, appId=152422119, instanceId=0
-                ),
+                guidPrefix=guid_prefix_packet,
             ),
             RTPSSubMessage_ACKNACK(
                 submessageId=6,
@@ -39,7 +37,7 @@ def send_acknack(ros2_node_ip, port):
         ]
     )
 
-    udp_packet = UDP(sport=33653, dport=port)
+    udp_packet = UDP(sport=33653, dport=7410)
     ip_packet = IP(dst=ros2_node_ip)
 
     packet = ip_packet / udp_packet / rtps_packet

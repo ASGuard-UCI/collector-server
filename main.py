@@ -12,12 +12,17 @@ from scapy.contrib.rtps.rtps import (
     RTPSMessage,
     RTPSSubMessage_ACKNACK,
     RTPSSubMessage_HEARTBEAT,
+    RTPSSubMessage_DATA,
 )
 from scapy.layers.all import IP, UDP
 from scapy.utils import PcapWriter
+from scapy.contrib.rtps import GUIDPrefixPacket
 
 from acknack import send_acknack
 from heartbeat import send_heartbeat
+from humble_talker_cyclone_data_w_ros_discovery_info import (
+    send_data_w_ros_discovery_info,
+)
 
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
@@ -60,15 +65,30 @@ def _process_packet(packet):
     now = datetime.now()
     try:
         ros2_node_ip = packet[IP].src
-        has_scanned = find_ip(ros2_node_ip)
-        if not has_scanned:
-            return
+        # has_scanned = find_ip(ros2_node_ip)
+        # if not has_scanned:
+        #     return
 
         pktdump = PcapWriter(f"data/{ros2_node_ip}.pcap", append=True, sync=True)
 
         raw_layer = bytes(packet[UDP].payload)
         src_port = packet[UDP].sport
         rtps_packet = RTPS(raw_layer)
+
+        # RTPS / RTPSMessage
+        rtps_layer = rtps_packet[RTPS]
+        host_id = rtps_layer.guidPrefix.hostId
+        app_id = rtps_layer.guidPrefix.appId
+        instance_id = rtps_layer.guidPrefix.instanceId
+
+        logger.info(f"Host ID: {host_id}")
+        logger.info(f"App ID: {app_id}")
+        logger.info(f"Instance ID: {instance_id}")
+
+        guid_prefix_packet = GUIDPrefixPacket(
+            hostId=host_id, appId=app_id, instanceId=instance_id
+        )
+
         rtps_message_packet = rtps_packet[RTPSMessage]
 
         ROS2_NODE_MAP[ros2_node_ip].append(rtps_message_packet)
@@ -81,11 +101,14 @@ def _process_packet(packet):
                 EXISTING_SESSIONS.add(ros2_node_ip)
 
             thread = threading.Thread(
-                target=_handle_session, args=[ros2_node_ip, src_port]
+                target=_handle_session,
+                args=[ros2_node_ip, src_port, guid_prefix_packet],
             )
             thread.start()
 
-        logger.info(f"Received RTPS packet at {now} from {ros2_node_ip}")
+        logger.info(
+            f"Received RTPS packet at {now} from {ros2_node_ip} on port {src_port}"
+        )
     except Exception as e:
         logger.error(f"Failed to dissect packet from {ros2_node_ip}", exc_info=True)
         return
@@ -109,10 +132,13 @@ def _geolocate(ip):
         )
         return {"region": None, "country": None}
     response = response.json()
-    return {"region": response["region"], "country": response["country_code"]}
+    try:
+        return {"region": response["region"], "country": response["country_code"]}
+    except KeyError:
+        return {"region": "test_region", "country": "test_country"}
 
 
-def _handle_session(ros2_node_ip, port):
+def _handle_session(ros2_node_ip, port, guid_prefix_packet):
     """
     Initiate a session (thread) that pops packets from its corresponding queue while the queue is not empty
     If the queue is empty for more than 10 seconds? stop the session
@@ -124,12 +150,15 @@ def _handle_session(ros2_node_ip, port):
     while datetime.now() - now <= timedelta(seconds=10):
         if len(ROS2_NODE_MAP[ros2_node_ip]) > 0:
             message_packet = ROS2_NODE_MAP[ros2_node_ip].popleft()
-            if message_packet.haslayer(RTPSSubMessage_HEARTBEAT):
-                heartbeat = message_packet[RTPSSubMessage_HEARTBEAT]
-                send_acknack(ros2_node_ip, port)
+            logger.info(f"Sending packet to {ros2_node_ip}")
+            if message_packet.haslayer(
+                RTPSSubMessage_HEARTBEAT
+            ) or message_packet.haslayer(RTPSSubMessage_DATA):
+                send_acknack(ros2_node_ip, port, guid_prefix_packet)
             if message_packet.haslayer(RTPSSubMessage_ACKNACK):
-                acknack = message_packet[RTPSSubMessage_ACKNACK]
-                # send_heartbeat(ros2_node_ip, port)
+                send_heartbeat(ros2_node_ip, port, guid_prefix_packet)
+
+            send_data_w_ros_discovery_info(ros2_node_ip, guid_prefix_packet)
 
             now = datetime.now()
 
